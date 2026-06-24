@@ -46,7 +46,7 @@ class YoloClassifier:
 # ============================================
 # FUNCIÓN PARA MAPA DE OCUSIÓN
 # ============================================
-def compute_occlusion_map(image_pil, yolo_classifier, target_class_id, 
+def compute_occlusion_map(image_pil, yolo_classifier, target_class_id,
                           patch_size=32, stride=16, mask_value=128):
     """
     Genera un mapa de oclusión para una imagen y una clase objetivo.
@@ -61,13 +61,9 @@ def compute_occlusion_map(image_pil, yolo_classifier, target_class_id,
 
     # Obtener la confianza original para la clase objetivo
     pred_original = yolo_classifier.predict(img_np)
-    conf_original = pred_original["confidence"]
-    if pred_original["class_id"] != target_class_id:
-        # Si la clase original no coincide, tomamos la confianza de la clase objetivo
-        # (puede ocurrir si la imagen no es de esa clase)
-        # Para simplificar, obtenemos la probabilidad de la clase objetivo
-        probs = pred_original["raw_result"].probs.data.cpu().numpy()
-        conf_original = probs[target_class_id]
+    # Asegurar que probs sea un array numpy
+    probs_original = pred_original["raw_result"].probs.data.cpu().numpy()
+    conf_original = probs_original[target_class_id]
 
     # Recorrer la imagen con el parche
     for y in range(0, h - patch_size + 1, stride):
@@ -82,25 +78,29 @@ def compute_occlusion_map(image_pil, yolo_classifier, target_class_id,
             probs_occluded = pred_occluded["raw_result"].probs.data.cpu().numpy()
             conf_occluded = probs_occluded[target_class_id]
 
-            # La caída de confianza indica importancia
+            # Caída de confianza (drop)
             drop = conf_original - conf_occluded
-            # Asignar el valor al centro del parche (o a toda la región)
-            importance_map[y:y+patch_size, x:x+patch_size] = max(importance_map[y:y+patch_size, x:x+patch_size], drop)
 
-    # Normalizar el mapa entre 0 y 1
+            # Asignar el máximo entre el valor actual y drop a toda la región
+            # Usamos np.maximum para comparar array con escalar
+            importance_map[y:y+patch_size, x:x+patch_size] = np.maximum(
+                importance_map[y:y+patch_size, x:x+patch_size],
+                drop
+            )
+
+    # Normalizar entre 0 y 1
     if importance_map.max() > 0:
         importance_map = importance_map / importance_map.max()
 
-    # Crear un mapa de calor con matplotlib
+    # Generar visualización con matplotlib
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.imshow(img_np)
-    # Superponer heatmap con transparencia
     im = ax.imshow(importance_map, cmap='jet', alpha=0.5, interpolation='bilinear')
     ax.axis('off')
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     plt.tight_layout()
 
-    # Convertir figura a imagen PIL
+    # Convertir a imagen PIL
     buf = BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
     buf.seek(0)
