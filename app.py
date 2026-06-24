@@ -47,67 +47,80 @@ class YoloClassifier:
 # FUNCIÓN PARA MAPA DE OCUSIÓN
 # ============================================
 def compute_occlusion_map(image_pil, yolo_classifier, target_class_id,
-                          patch_size=32, stride=16, mask_value=128):
+                          patch_size=70, stride=20, mask_value=0):
     """
-    Genera un mapa de oclusión para una imagen y una clase objetivo.
-    Retorna un heatmap (array 2D) y la imagen superpuesta (PIL).
+    Genera un mapa de oclusión rápido basado en el enfoque del código original.
+    - Parche grande y stride amplio para acelerar.
+    - Umbral dinámico: para clase 'NORMAL' solo pinta caídas > 40%, para 'PNEUMONIA' > 5%.
+    - Retorna la imagen superpuesta (PIL).
     """
-    # Convertir a numpy y asegurar RGB
-    img_np = np.array(image_pil.convert('RGB'))
-    h, w, _ = img_np.shape
+    # Redimensionar a 224x224 (tamaño de entrada del modelo)
+    img_pil = image_pil.convert('RGB').resize((224, 224))
+    img_np = np.array(img_pil)
+
+    # Predicción base
+    pred_base = yolo_classifier.predict(img_np)
+    probs_base = pred_base["raw_result"].probs.data.cpu().numpy()
+    conf_base = probs_base[target_class_id]
+    class_name = pred_base["class_name"]
 
     # Inicializar mapa de importancia
-    importance_map = np.zeros((h, w), dtype=np.float32)
+    importance_map = np.zeros((224, 224), dtype=np.float32)
 
-    # Obtener la confianza original para la clase objetivo
-    pred_original = yolo_classifier.predict(img_np)
-    # Asegurar que probs sea un array numpy
-    probs_original = pred_original["raw_result"].probs.data.cpu().numpy()
-    conf_original = probs_original[target_class_id]
+    # Deslizar el parche
+    for y in range(0, 224, stride):
+        for x in range(0, 224, stride):
+            # Copia con oclusión (negro = máscara)
+            img_occluded = img_np.copy()
+            y_end = min(224, y + patch_size)
+            x_end = min(224, x + patch_size)
+            img_occluded[y:y_end, x:x_end] = mask_value
 
-    # Recorrer la imagen con el parche
-    for y in range(0, h - patch_size + 1, stride):
-        for x in range(0, w - patch_size + 1, stride):
-            # Crear copia de la imagen
-            img_copy = img_np.copy()
-            # Ocluir el parche con un valor constante (gris medio)
-            img_copy[y:y+patch_size, x:x+patch_size] = mask_value
-
-            # Predecir con la imagen ocluida
-            pred_occluded = yolo_classifier.predict(img_copy)
+            # Inferencia
+            pred_occluded = yolo_classifier.predict(img_occluded)
             probs_occluded = pred_occluded["raw_result"].probs.data.cpu().numpy()
             conf_occluded = probs_occluded[target_class_id]
 
-            # Caída de confianza (drop)
-            drop = conf_original - conf_occluded
+            # Caída de confianza
+            drop = conf_base - conf_occluded
+            importance_map[y:y_end, x:x_end] = max(importance_map[y:y_end, x:x_end].max(), drop)
 
-            # Asignar el máximo entre el valor actual y drop a toda la región
-            # Usamos np.maximum para comparar array con escalar
-            importance_map[y:y+patch_size, x:x+patch_size] = np.maximum(
-                importance_map[y:y+patch_size, x:x+patch_size],
-                drop
-            )
+    # Normalizar
+    max_drop = importance_map.max()
+    if max_drop == 0:
+        max_drop = 1e-6
 
-    # Normalizar entre 0 y 1
-    if importance_map.max() > 0:
-        importance_map = importance_map / importance_map.max()
+    # Umbral dinámico según clase
+    if class_name == 'NORMAL':
+        threshold = 0.40  # solo pinta si cae > 40%
+    else:
+        threshold = 0.05  # con que caiga > 5% ya lo marca
 
-    # Generar visualización con matplotlib
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.imshow(img_np)
-    im = ax.imshow(importance_map, cmap='jet', alpha=0.5, interpolation='bilinear')
-    ax.axis('off')
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    plt.tight_layout()
+    # Aplicar umbral: si la caída máxima es menor que el umbral, no pintamos nada
+    if max_drop < threshold:
+        # Escalamos para que el mapa sea casi invisible (o lo dejamos en cero)
+        importance_map = np.zeros_like(importance_map)
+    else:
+        # Normalizar al rango [0,1] y luego escalar para que el umbral sea el mínimo visible
+        importance_map = np.clip((importance_map - threshold) / (max_drop - threshold), 0, 1)
 
-    # Convertir a imagen PIL
-    buf = BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
-    buf.seek(0)
-    heatmap_pil = Image.open(buf)
-    plt.close(fig)
+    # Redimensionar mapa al tamaño original (para superposición)
+    orig_w, orig_h = image_pil.size
+    importance_map_resized = cv2.resize(importance_map, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
 
-    return importance_map, heatmap_pil
+    # Crear mapa de color (jet) y superponer
+    heatmap_color = cv2.applyColorMap(np.uint8(255 * importance_map_resized), cv2.COLORMAP_JET)
+    heatmap_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+
+    # Imagen original (en tamaño original)
+    img_original = np.array(image_pil.convert('RGB'))
+    # Superponer con transparencia (0.6 imagen, 0.4 mapa)
+    superimposed = cv2.addWeighted(img_original, 0.6, heatmap_rgb, 0.4, 0)
+
+    # Convertir a PIL
+    superimposed_pil = Image.fromarray(superimposed)
+
+    return importance_map, superimposed_pil
 
 
 # ============================================
