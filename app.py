@@ -1,5 +1,4 @@
 import streamlit as st
-import cv2
 import numpy as np
 from PIL import Image
 import time
@@ -8,19 +7,32 @@ from ultralytics import YOLO
 
 # --- CONFIGURACIÓN DE PÁGINA (Layout Wide para estilo Consola) ---
 st.set_page_config(
-    page_title="Consola de Diagnóstico IA",
+    page_title="Asistente Diagnóstico IA",
     page_icon="🩻",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# --- CSS PERSONALIZADO (Estilo Dark Console) ---
+# --- CSS PERSONALIZADO (Estilo Dark Console + Botones Visibles) ---
 st.markdown("""
 <style>
     /* Forzar fondo oscuro */
     .stApp {
         background-color: #0b0f19;
         color: #e2e8f0;
+    }
+    
+    /* Botones siempre visibles */
+    .stButton>button {
+        background-color: #1f2937;
+        color: #ffffff;
+        border: 1px solid #374151;
+        transition: all 0.3s;
+    }
+    .stButton>button:hover {
+        background-color: #374151;
+        border-color: #00e5ff;
+        color: #00e5ff;
     }
     
     /* Títulos principales */
@@ -80,8 +92,8 @@ st.markdown("""
 # --- ENCABEZADO ---
 st.markdown("""
 <div class="main-header">
-    <h1>Consola de <span>Diagnóstico IA</span></h1>
-    <div class="sub-header">Visualiza cómo una red neuronal detecta anomalías en radiografías de tórax.</div>
+    <h1>🩻 Asistente Diagnóstico: <span>Neumonía</span></h1>
+    <div class="sub-header">Arquitectura en Cascada basada en YOLOv11 (Transfer Learning)</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -95,42 +107,6 @@ def cargar_modelos():
 
 modelo_a, modelo_b = cargar_modelos()
 
-# --- FUNCIÓN DE MAPA DE CALOR OPTIMIZADA PARA WEB ---
-def generar_mapa_web(img_array, modelo, clase_predicha, prob_base):
-    # Reducimos un poco la resolución y agrandamos el paso para que no demore tanto en la web
-    img_resized = cv2.resize(img_array, (224, 224))
-    mapa_calor = np.zeros((224, 224), dtype=np.float32)
-    tamano_parche = 60
-    paso = 30 # Saltos grandes para procesar rápido
-    
-    idx_clase = list(modelo.names.values()).index(clase_predicha)
-    
-    for y in range(0, 224, paso):
-        for x in range(0, 224, paso):
-            img_oclusion = img_resized.copy()
-            y_fin, x_fin = min(224, y + tamano_parche), min(224, x + tamano_parche)
-            img_oclusion[y:y_fin, x:x_fin] = 0 # Oclusión negra
-            
-            res = modelo(img_oclusion, verbose=False)[0]
-            prob_nueva = res.probs.data[idx_clase].item()
-            mapa_calor[y:y_fin, x:x_fin] += (prob_base - prob_nueva)
-            
-    mapa_calor = np.maximum(mapa_calor, 0)
-    max_caida = np.max(mapa_calor)
-    
-    umbral = 0.40 if clase_predicha == 'NORMAL' else 0.05
-    if max_caida > umbral:  
-        mapa_calor /= max_caida  
-    else:
-        mapa_calor /= umbral if umbral > 0 else 1
-        
-    mapa_redimensionado = cv2.resize(mapa_calor, (img_array.shape[1], img_array.shape[0]))
-    mapa_color = cv2.applyColorMap(np.uint8(255 * mapa_redimensionado), cv2.COLORMAP_JET)
-    mapa_color_rgb = cv2.cvtColor(mapa_color, cv2.COLOR_BGR2RGB)
-    
-    img_final = cv2.addWeighted(img_array, 0.6, mapa_color_rgb, 0.4, 0)
-    return img_final
-
 # --- MANEJO DE ESTADO (Para la botonera de Casos de Prueba) ---
 if 'imagen_actual' not in st.session_state:
     st.session_state.imagen_actual = None
@@ -139,7 +115,7 @@ def cargar_caso_prueba(ruta):
     if os.path.exists(ruta):
         st.session_state.imagen_actual = Image.open(ruta)
     else:
-        st.error(f"Falta el archivo: {ruta}. Asegúrate de crear la carpeta 'casos_prueba'.")
+        st.error(f"Falta el archivo: {ruta}. Asegúrate de que esté en la misma carpeta que la app.")
 
 # --- MAQUETADO DE 3 COLUMNAS ---
 col1, col2, col3 = st.columns([1, 2.5, 1], gap="large")
@@ -158,23 +134,23 @@ with col1:
 
     st.markdown('<div class="card-container">', unsafe_allow_html=True)
     st.markdown("#### CASOS DE PRUEBA")
-    # Botonera para inyectar imágenes precargadas
+    # Botonera para inyectar imágenes precargadas (imágenes sueltas en la misma carpeta)
     if st.button("🫁 Cargar Pulmón Sano", use_container_width=True):
-        cargar_caso_prueba("casos_prueba/sano.jpeg")
+        cargar_caso_prueba("sano.jpeg")
     if st.button("🦠 Cargar Infección (Bacteria)", use_container_width=True):
-        cargar_caso_prueba("casos_prueba/bacteria.jpeg")
+        cargar_caso_prueba("bacteria.jpeg")
     if st.button("🧬 Cargar Infección (Virus)", use_container_width=True):
-        cargar_caso_prueba("casos_prueba/virus.jpeg")
+        cargar_caso_prueba("virus.jpeg")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ==========================================
 # VARIABLES GLOBALES DE INFERENCIA
 # ==========================================
-img_para_mostrar = None
 clase_final = ""
 conf_final = 0.0
 clase_etiologia = ""
-t_pre = t_inf = t_grad = 0
+t_pre = 0.0
+t_inf = 0.0
 
 # ==========================================
 # COLUMNA 2: VISOR PRINCIPAL
@@ -197,7 +173,7 @@ with col2:
                 # 1. Preparar imagen
                 t_inicio = time.time()
                 img_array = np.array(st.session_state.imagen_actual.convert('RGB'))
-                t_pre = int((time.time() - t_inicio) * 1000)
+                t_pre = time.time() - t_inicio
                 
                 # 2. Inferencia Triaje (Fase A)
                 with st.spinner("Analizando placa radiográfica..."):
@@ -210,23 +186,10 @@ with col2:
                         # Fase B
                         pred_b = modelo_b(img_array, verbose=False)[0]
                         clase_etiologia = pred_b.names[pred_b.probs.top1]
-                    t_inf = int((time.time() - t_inicio_inf) * 1000)
+                    t_inf = time.time() - t_inicio_inf
                 
-                # 3. Generar Mapa de Calor
-                with st.spinner("Generando mapa de oclusión (Explicabilidad)..."):
-                    t_inicio_grad = time.time()
-                    # Seleccionamos qué modelo usar para el mapa
-                    modelo_mapa = modelo_a if clase_final == "NORMAL" else modelo_b
-                    clase_mapa = clase_final if clase_final == "NORMAL" else clase_etiologia
-                    
-                    # Para el mapa de neumonía, usamos la confianza de Fase B si es necesario, 
-                    # pero mejor usar la confianza de fase A para oclusión
-                    prob_base_mapa = conf_final
-                    
-                    img_mapa = generar_mapa_web(img_array, modelo_a, clase_final, conf_final)
-                    t_grad = int((time.time() - t_inicio_grad) * 1000)
-                    
-                    visor_contenedor.image(img_mapa, use_container_width=True)
+                # Mostramos la imagen limpia sin alteraciones
+                visor_contenedor.image(st.session_state.imagen_actual, use_container_width=True)
             else:
                 # Si no apretaron el botón, solo mostramos la original
                 visor_contenedor.image(st.session_state.imagen_actual, use_container_width=True)
@@ -247,19 +210,28 @@ with col3:
     if clase_final == "PNEUMONIA":
         st.markdown(f"""
         <div class="resultado-anomalia">
-            <h2>⚠️ ANOMALY</h2>
-            <p style="margin-bottom:0;">{clase_etiologia}</p>
+            <h2>⚠️ ANOMALÍA</h2>
+            <p style="margin-bottom:0;">Causa: {clase_etiologia}</p>
             <p class="mini-text">Confianza {conf_final*100:.1f}%</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        # Recomendación Médica
+        if clase_etiologia == "BACTERIA":
+            st.warning("Recomendación Médica: Evaluar inicio de tratamiento antibiótico.")
+        else:
+            st.warning("Recomendación Médica: Cuadro compatible con infección viral. Evaluar tratamiento sintomático/antiviral.")
+
     elif clase_final == "NORMAL":
         st.markdown(f"""
         <div class="resultado-sano">
-            <h2>✅ NORMAL</h2>
+            <h2>✅ SANO</h2>
             <p style="margin-bottom:0;">Sin Infiltrados</p>
             <p class="mini-text">Confianza {conf_final*100:.1f}%</p>
         </div>
         """, unsafe_allow_html=True)
+        st.info("Fin del diagnóstico. No se detectan infiltrados alveolares.")
+        
     else:
         st.markdown("""
         <div style="border: 2px dashed #334155; border-radius: 12px; padding: 20px; text-align: center; color: #64748b;">
@@ -270,27 +242,25 @@ with col3:
         
     st.markdown('</div>', unsafe_allow_html=True)
     
-    # --- METRICAS DE LATENCIA ---
+    # --- METRICAS DE LATENCIA (EN SEGUNDOS) ---
     st.markdown('<div class="card-container">', unsafe_allow_html=True)
     st.markdown("#### LATENCIA PIPELINE")
     
-    st.markdown(f"<div style='display:flex; justify-content:space-between;'><span class='mini-text'>PREPROCESAMIENTO</span><span class='mini-text'>{t_pre} ms</span></div>", unsafe_allow_html=True)
-    st.progress(min(t_pre / 100, 1.0)) # Barra simbólica
+    st.markdown(f"<div style='display:flex; justify-content:space-between;'><span class='mini-text'>PREPROCESAMIENTO</span><span class='mini-text'>{t_pre:.3f} s</span></div>", unsafe_allow_html=True)
+    st.progress(min(t_pre / 0.1, 1.0)) # Barra simbólica (Límite visual 0.1s)
     
-    st.markdown(f"<div style='display:flex; justify-content:space-between; margin-top:10px;'><span class='mini-text'>INFERENCIA (GPU/CPU)</span><span class='mini-text'>{t_inf} ms</span></div>", unsafe_allow_html=True)
-    st.progress(min(t_inf / 500, 1.0))
-    
-    st.markdown(f"<div style='display:flex; justify-content:space-between; margin-top:10px;'><span class='mini-text'>XAI OCLUSIÓN</span><span class='mini-text'>{t_grad} ms</span></div>", unsafe_allow_html=True)
-    st.progress(min(t_grad / 5000, 1.0))
+    st.markdown(f"<div style='display:flex; justify-content:space-between; margin-top:10px;'><span class='mini-text'>INFERENCIA (GPU/CPU)</span><span class='mini-text'>{t_inf:.3f} s</span></div>", unsafe_allow_html=True)
+    st.progress(min(t_inf / 1.0, 1.0)) # Barra simbólica (Límite visual 1s)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- INTERPRETACION ---
+    # --- INSTRUCCIONES ---
     st.markdown('<div class="card-container">', unsafe_allow_html=True)
-    st.markdown("#### Interpretación")
+    st.markdown("#### Instrucciones de uso")
     st.markdown("""
     <p class="mini-text">
-    Las zonas iluminadas indican los patrones visuales críticos (gradientes de caída) utilizados por el modelo para establecer la predicción actual.
-    <br><br>
+    1. Suba una radiografía de tórax frontal.<br>
+    2. El sistema evaluará primero la presencia de infiltrados (Triaje).<br>
+    3. Si detecta anomalías, un segundo modelo determinará la probable etiología (Bacteriana/Viral).<br><br>
     <em>Este es un sistema de soporte al diagnóstico (CAD) y no sustituye el criterio médico profesional.</em>
     </p>
     """, unsafe_allow_html=True)
